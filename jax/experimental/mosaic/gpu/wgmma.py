@@ -31,7 +31,6 @@ from . import utils
 from .mma import SUPPORTED_F8_TYPES
 
 
-c = utils.c
 bytewidth = utils.bytewidth
 
 
@@ -434,47 +433,44 @@ def wgmma(
   )
 
   # Step 3. Compute the operand descriptors.
+  k_instr_elems = 32 // utils.bytewidth(element_type)
+
+  def _k_instr_stride(desc: mma_utils.SmemDescriptor) -> int:
+    if k_group_elems <= k_instr_elems:
+      return 32
+    # Bits [0:13] store the 16-byte encoded start-address offset.
+    return (desc.slice_const(0, k_instr_elems) & 0x3FFF) << 4
+
   if a_in_regs:
-    a_desc_base = a_m_group_stride = a_k_group_stride = None
+    a_desc = None
     a_instr_params = dict(a_transpose=None, a_k_stride=None)
   else:
     assert isinstance(a, ir.Value)
-    (
-        (a_desc_base, a_k_instr_stride),
-        (a_m_group_stride, a_k_group_stride),
-        a_fastest,
-    ) = mma_utils.create_descriptor(
+    a_desc = mma_utils.create_descriptor(
         a,
         swizzle=swizzle,
-        large_tile=(m_group_elems, k_group_elems),
-        group_size=(m_group_elems, k_group_elems),
+        mn_size=m_group_elems,
         logical_k_major=False,
+        large_tile=(m_group_elems, k_group_elems),
     )
-    assert not a_k_instr_stride[0]  # We'd need separate a/b swizzles.
-    a_k_instr_stride = a_k_instr_stride[1][0]
-    a_instr_params = dict(a_transpose=a_fastest != mma_utils.Dim.K,
-                          a_k_stride=a_k_instr_stride)
-  (
-      (b_desc_base, b_k_instr_stride),
-      (b_n_group_stride, b_k_group_stride),
-      b_fastest,
-  ) = mma_utils.create_descriptor(
+    a_instr_params = dict(
+        a_transpose=a_desc.fastest_dim != mma_utils.Dim.K,
+        a_k_stride=_k_instr_stride(a_desc),
+    )
+  b_desc = mma_utils.create_descriptor(
       b,
       swizzle=swizzle,
-      large_tile=(k_group_elems,) * 2,  # It's not a typo that we use k for n.
-      group_size=(k_group_elems, n_group_elems),
+      mn_size=n_group_elems,
       logical_k_major=True,
+      large_tile=(k_group_elems,) * 2,  # It's not a typo that we use k for n.
   )
-  assert not b_k_instr_stride[0]  # We'd need separate a/b swizzles.
-  b_k_instr_stride = b_k_instr_stride[1][0]
-  del b_n_group_stride  # We only support one N group.
+  b_k_instr_stride = _k_instr_stride(b_desc)
 
   # Step 4. Issue the instructions.
   if a_in_regs:
     assert isinstance(a, fa.FragmentedArray)
     a = wgmma_fence(a)  # Make sure the registers are ready.
 
-  i64 = ir.IntegerType.get_signless(64)
   new_acc_regs = acc._value.registers.copy()
   for mi in range(m_groups):
     for ki in range(k_groups):
@@ -485,14 +481,9 @@ def wgmma(
             ki * k_group_elems : (ki + 1) * k_group_elems,
         ]
       else:
-        assert a_m_group_stride is not None and a_k_group_stride is not None
-        a_group_offset = mi * a_m_group_stride + ki * a_k_group_stride
-        a_mk = _llvm_add(
-            a_desc_base, c(mma_utils.encode_addr(a_group_offset), i64),
-        )
-      b_k = _llvm_add(
-          b_desc_base, c(mma_utils.encode_addr(ki * b_k_group_stride), i64)
-      )
+        assert a_desc is not None
+        a_mk = a_desc.slice_i64(mi * m_group_elems, ki * k_group_elems)
+      b_k = b_desc.slice_i64(0, ki * k_group_elems)
       new_acc_regs[mi : mi + 1] = wgmma_m64(
           new_acc_regs[mi : mi + 1],
           a_mk,
@@ -501,7 +492,7 @@ def wgmma(
           n=n_group_elems,
           a_element_type=a_wgmma_element_type,
           b_element_type=b_wgmma_element_type,
-          b_transpose=b_fastest != mma_utils.Dim.K,
+          b_transpose=b_desc.fastest_dim != mma_utils.Dim.K,
           b_k_stride=b_k_instr_stride,
           **a_instr_params,
       )
