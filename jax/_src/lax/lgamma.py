@@ -50,6 +50,7 @@ table.
 from __future__ import annotations
 
 from jax._src import config
+from jax._src import core
 from jax._src.api import jit
 from jax._src.lax import lax
 from jax._src.lax import slicing
@@ -452,6 +453,8 @@ def _lgamma_neg_root(x_neg_safe, n, delta):
   dnums = slicing.GatherDimensionNumbers(
       offset_dims=(), collapsed_slice_dims=(0,), start_index_map=(0,)
   )
+  x_s = core.typeof(x_neg_safe).sharding
+  gather_sharding = None if x_s.mesh.empty else x_s
 
   def _gather_row(i):
     return slicing.gather(
@@ -459,6 +462,7 @@ def _lgamma_neg_root(x_neg_safe, n, delta):
         idx_exp,
         dnums,
         slice_sizes=(1,),
+        out_sharding=gather_sharding,
     )
 
   # Gather one 1D row at a time so GPU kernels do not keep all 18 table rows
@@ -1119,6 +1123,8 @@ def _lgamma_neg_root_f64(x_neg_safe, n):
   dnums = slicing.GatherDimensionNumbers(
       offset_dims=(), collapsed_slice_dims=(0,), start_index_map=(0,)
   )
+  x_s = core.typeof(x_neg_safe).sharding
+  gather_sharding = None if x_s.mesh.empty else x_s
 
   def _gather_row(i):
     return slicing.gather(
@@ -1126,6 +1132,7 @@ def _lgamma_neg_root_f64(x_neg_safe, n):
         idx_exp,
         dnums,
         slice_sizes=(1,),
+        out_sharding=gather_sharding,
     )
 
   # Gather one 1D row at a time so GPU kernels do not keep a 21-element float64
